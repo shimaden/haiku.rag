@@ -3,6 +3,7 @@ import logging
 import os
 import time
 from typing import TYPE_CHECKING
+from urllib.parse import unquote
 from uuid import uuid4
 
 from haiku.rag.circuit_breaker import CircuitBreaker
@@ -13,6 +14,7 @@ from haiku.rag.ingester.queue.repository import JobRepo, SyncStateRepo
 from haiku.rag.ingester.workers.pipeline import run_job
 from haiku.rag.ingester.workers.retry import RetryPolicy, compute_backoff
 from haiku.rag.telemetry import logfire
+from rich.highlighter import ReprHighlighter
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -22,6 +24,30 @@ if TYPE_CHECKING:
     from haiku.rag.sources.base import Source
 
 logger = logging.getLogger(__name__)
+
+
+def _display_uri(uri: str) -> str:
+    """Display only: decode %XX escapes as UTF-8, except for spaces (%20)."""
+    return "%20".join(unquote(part) for part in uri.split("%20"))
+
+
+class _UriHighlighter(ReprHighlighter):
+    """ReprHighlighter plus a rule that colors a whole URI as one URL, even
+    when it contains non-ASCII characters such as Japanese.
+
+    Rich's built-in URL rule only accepts ASCII, so coloring stops at the first
+    multibyte character. The added rule is applied last, so it overrides the
+    built-in coloring.
+    """
+
+    highlights = ReprHighlighter.highlights + [
+        r"(?P<url>(?:file|https?)://\S+)",
+    ]
+
+
+# RichHandler prefers a record's extra["highlighter"] over its own default.
+# Other handlers simply ignore it.
+_URI_LOG_EXTRA = {"highlighter": _UriHighlighter()}
 
 
 def _terminate_wedged_process() -> None:  # pragma: no cover - ends the process
@@ -336,7 +362,13 @@ class WorkerPool:
 
     async def _run_job_lifecycle(self, job: Job, worker_id: str) -> None:
         started = time.monotonic()
-        logger.info("Processing %s %s (job %s)", job.op.value, job.uri, job.id)
+        logger.info(
+            "Processing %s %s (job %s)",
+            job.op.value,
+            _display_uri(job.uri),
+            job.id,
+            extra=_URI_LOG_EXTRA,
+        )
         try:
             result = await run_job(
                 self._client,
@@ -457,7 +489,8 @@ class WorkerPool:
                     logger.info(
                         "Pruned %d dead job(s) for %s after successful DELETE",
                         pruned,
-                        job.uri,
+                        _display_uri(job.uri),
+                        extra=_URI_LOG_EXTRA,
                     )
             else:
                 await self._sync.upsert(
@@ -479,5 +512,9 @@ class WorkerPool:
                 job.uri,
             )
         logger.info(
-            "Job %s succeeded in %.2fs: %s", job.id, time.monotonic() - started, job.uri
+            "Job %s succeeded in %.2fs: %s",
+            job.id,
+            time.monotonic() - started,
+            _display_uri(job.uri),
+            extra=_URI_LOG_EXTRA,
         )
